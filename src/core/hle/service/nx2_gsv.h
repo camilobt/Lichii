@@ -29,6 +29,7 @@
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
+#include "common/nx2_host.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -1853,8 +1854,25 @@ private:
                                     !system.Host1x().GetSyncpointManager().IsReadyGuest(
                                         m_previous_fence_id, m_previous_fence_value);
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
+            // That second wait takes the frame the game runs ahead away whenever Eden's GPU
+            // threads are the slower side, not only when the host GPU is saturated. On a Steam
+            // Deck they always are (they wait for the slow host GPU many times a frame), so every
+            // other present drained the pipeline and the GPU threads then had nothing to do while
+            // the game prepared the next frame. Ocarina runs a frame ahead on every faster host;
+            // on an integrated AMD GPU on RADV it keeps doing so. The previous frame's fence
+            // still bounds it to one frame. EDEN_NX2_PRESENT_DRAIN=1 always waits for this frame
+            // when behind, =0 never does (any title: Splatoon Raiders needs the wait).
+            static const int drain_setting = Common::Nx2Host::EnvSwitch("EDEN_NX2_PRESENT_DRAIN");
+            const bool drain_when_behind =
+                drain_setting >= 0 ? drain_setting == 1
+                                   : !(app_program_id == OcarinaOfTimeProgramId &&
+                                       Common::Nx2Host::IsIntegratedRadv());
             if (gpu_behind) {
-                WaitForFrame(~w[22], w[24]);
+                ++m_stats.behind;
+                if (drain_when_behind) {
+                    ++m_stats.drained;
+                    WaitForFrame(~w[22], w[24]);
+                }
             }
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);
@@ -1921,10 +1939,12 @@ private:
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
-                         "pacing {} us, {} ran a frame ahead",
+                         "pacing {} us, {} ran a frame ahead, {} found the previous frame "
+                         "unfinished ({} then waited for their own)",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600, m_stats.ran_ahead);
+                         m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.behind,
+                         m_stats.drained);
                 m_stats = {.last_present = entered};
             }
         }
@@ -1943,6 +1963,7 @@ private:
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
         u32 presents{}, ran_ahead{};
+        u32 behind{}, drained{}; ///< Presents with the previous frame unfinished; those drained
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)

@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -104,11 +105,37 @@ bool ReleasesLandAtOnce() {
 }
 
 enum class AcquireCheck {
-    Met,         ///< By the word in memory
-    MetByQueued, ///< By a release sent to the word that the back has not run yet
-    NotMet,      ///< Nothing sent to the word can meet it yet
-    Drain,       ///< Drain the split and read the word as before
+    Met,           ///< By the word in memory
+    MetByQueued,   ///< By a release sent to the word that the back has not run yet
+    MetByUnlanded, ///< By a fence-flagged release the back ran, not in memory yet (FENCE_VIEW)
+    NotMet,        ///< Nothing sent to the word can meet it yet
+    Drain,         ///< Drain the split and read the word as before
 };
+
+// EDEN_NX2_FENCE_VIEW: whether a greater-or-equal acquire is met by a fence-flagged release the
+// back already ran, which only waits for the host GPU to pass its fence before the query cache
+// writes it to memory. The host runs every channel on one queue in the order the back recorded
+// them, so the work after the acquire is recorded after the release and the work before it, as
+// when the queued view above passes a release the back has not run yet. Waiting for the fence
+// instead parked the channel for a whole host GPU round trip (~7 ms on a Steam Deck), and the
+// host GPU idled behind it. The guest CPU still sees the release only once it lands.
+bool UnlandedReleaseMeets(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
+    if (!acquire.WaitsToReach() ||
+        !VideoCommon::Nx2Latency::Enabled(VideoCommon::Nx2Latency::Switch::FenceView) ||
+        !ReleasesLandAtOnce()) {
+        return false;
+    }
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
+    if (!device) {
+        return false;
+    }
+    const auto payload = VideoCommon::Nx2Latency::UnlandedReleases::Get().Payload(*device);
+    if (!payload || !acquire.Matches(*payload)) {
+        return false;
+    }
+    VideoCommon::Count(VideoCommon::g_acquire_stats.by_unlanded);
+    return true;
+}
 
 // Checks a greater-or-equal acquire without draining the split. The words Switch 2 syncs on only
 // advance (NVN2 even releases QMD completions as maxima, KeplerCompute::ProcessNativeMethod), so
@@ -138,9 +165,11 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
         VideoCommon::Count(stats.drain_queued);
         return AcquireCheck::Drain;
     }
-    return acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))
-               ? AcquireCheck::Met
-               : AcquireCheck::NotMet;
+    if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
+        return AcquireCheck::Met;
+    }
+    return UnlandedReleaseMeets(dma_pusher, acquire) ? AcquireCheck::MetByUnlanded
+                                                     : AcquireCheck::NotMet;
 }
 
 // EDEN_NX2_ACQUIRE_VERIFY=1: drains anyway and counts where the word after the drain disagrees
@@ -159,7 +188,7 @@ void VerifyWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
         }
         return;
     }
-    if (decided == AcquireCheck::MetByQueued) {
+    if (decided == AcquireCheck::MetByQueued || decided == AcquireCheck::MetByUnlanded) {
         // A fence-flagged release writes memory once the host GPU passed it.
         VideoCommon::Count(stats.unlanded);
         return;
@@ -201,6 +230,12 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     }
     auto& stats = VideoCommon::g_acquire_stats;
     switch (const AcquireCheck check = CheckWithoutDrain(dma_pusher, *pending_acquire); check) {
+    case AcquireCheck::MetByUnlanded:
+        // As a queued release: what the front reads next waits for the work sent before it.
+        VideoCommon::GpuSplit::Get().NoteSync();
+        VideoCommon::Count(stats.passed);
+        VerifyWithoutDrain(dma_pusher, *pending_acquire, check);
+        return true;
     case AcquireCheck::MetByQueued:
         // What the front reads after the acquire waits for the work sent before the release.
         VideoCommon::GpuSplit::Get().NoteSync();
@@ -248,6 +283,10 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         return true;
     }
     if (pending_acquire->Matches(current)) {
+        return true;
+    }
+    // Drained: every release sent ran, and one that only waits for its fence meets it.
+    if (UnlandedReleaseMeets(dma_pusher, *pending_acquire)) {
         return true;
     }
     // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
@@ -440,12 +479,15 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         auto& stats = VideoCommon::g_acquire_stats;
         if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
-            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
-            if (without_drain == AcquireCheck::MetByQueued) {
+            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued ||
+            without_drain == AcquireCheck::MetByUnlanded) {
+            if (without_drain != AcquireCheck::Met) {
                 // What the front reads after the acquire waits for the work sent before the
                 // release (GpuSplit::NoteSync).
                 VideoCommon::GpuSplit::Get().NoteSync();
-                VideoCommon::Count(stats.by_queued);
+                if (without_drain == AcquireCheck::MetByQueued) {
+                    VideoCommon::Count(stats.by_queued);
+                }
             }
             VideoCommon::Count(stats.passed);
             VerifyWithoutDrain(dma_pusher, acquire, without_drain);
@@ -453,7 +495,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Count(stats.drained);
         DrainBack();
-        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address)) ||
+            UnlandedReleaseMeets(dma_pusher, acquire)) {
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts

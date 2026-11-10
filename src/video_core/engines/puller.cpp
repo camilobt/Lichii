@@ -291,6 +291,16 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
     if (pending_acquire) {
+        if (VideoCommon::g_acquire_counting) {
+            // How long channels stay suspended on acquires (EDEN_NX2_GPU_PROFILE).
+            auto& stats = VideoCommon::g_acquire_stats;
+            VideoCommon::Count(stats.parked);
+            VideoCommon::Count(stats.parked_ns,
+                               static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    std::chrono::steady_clock::now() -
+                                                    pending_acquire->since)
+                                                    .count()));
+        }
         pending_acquire.reset();
         dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
         Nx2SemaphoreWaiters::Get().Remove(this);

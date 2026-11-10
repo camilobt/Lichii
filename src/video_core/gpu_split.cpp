@@ -29,6 +29,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -677,6 +678,16 @@ void GpuSplit::ReportAcquire() {
              passed, by_queued, latched, drained, valve_drains, drain_operation, drain_settings,
              drain_word, drain_queued, polls, acquire_polls, list_polls, back_waits, back_sleeps,
              spin_ms, early_publishes, settles);
+    const u64 by_unlanded = take(stats.by_unlanded);
+    const u64 parked = take(stats.parked);
+    const double parked_ms = static_cast<double>(take(stats.parked_ns)) / 1e6;
+    LOG_INFO(HW_GPU,
+             "Acquire waits in 10 s: {} suspended channels resumed after {:.1f} ms in all ({:.2f} ms "
+             "each); {} acquires met by a fence-flagged release the back ran before its fence "
+             "landed (EDEN_NX2_FENCE_VIEW {})",
+             parked, parked_ms, parked != 0 ? parked_ms / static_cast<double>(parked) : 0.0,
+             by_unlanded,
+             Nx2Latency::Enabled(Nx2Latency::Switch::FenceView) ? "on" : "off");
     const u64 mismatches = take(stats.mismatches);
     const u64 unlanded = take(stats.unlanded);
     const u64 late = take(stats.late);

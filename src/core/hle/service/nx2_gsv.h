@@ -1849,9 +1849,20 @@ private:
             // commands, then crashes, with a slow GPU). Wait for this frame too then. Not when a
             // suspended channel brought us here: this frame can't finish before the present
             // returns.
-            const bool gpu_behind = frames_ahead == 1 && m_previous_fence_id < 192 &&
-                                    !system.Host1x().GetSyncpointManager().IsReadyGuest(
-                                        m_previous_fence_id, m_previous_fence_value);
+            bool gpu_behind = frames_ahead == 1 && m_previous_fence_id < 192 &&
+                              !system.Host1x().GetSyncpointManager().IsReadyGuest(
+                                  m_previous_fence_id, m_previous_fence_value);
+            // Where the GPU side (guest GPU thread, back, host GPU) takes longer per frame than
+            // the game's CPU, which is every frame on a Steam Deck, "the GPU is behind" is true at
+            // each present, so this rule turned the one frame lead into none: the game then waited
+            // for its own frame and the frame time became CPU time + GPU-side time instead of the
+            // larger of the two. Ocarina is built for the lead (the console runs it, and its
+            // buffers are not reused before the previous frame's fence), so it keeps it there.
+            // EDEN_NX2_KEEP_LEAD=0 brings back the wait, =1 keeps the lead on any host.
+            if (gpu_behind && KeepLeadWhenBehind(app_program_id)) {
+                gpu_behind = false;
+                ++m_stats.lead_kept;
+            }
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             if (gpu_behind) {
                 WaitForFrame(~w[22], w[24]);
@@ -1921,16 +1932,32 @@ private:
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
-                         "pacing {} us, {} ran a frame ahead",
+                         "pacing {} us, {} ran a frame ahead, {} kept the lead with the GPU behind",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600, m_stats.ran_ahead);
+                         m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.lead_kept);
                 m_stats = {.last_present = entered};
             }
         }
         constexpr u64 AvailableSlots = 0x7fff;
         TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots),
                              static_cast<u32>(AvailableSlots >> 32), 0, 0, 0, 0});
+    }
+
+    /// Whether a present that finds the previous frame unfinished may still return once only that
+    /// frame is done (EDEN_NX2_FRAMES_AHEAD=1's lead), instead of also waiting for its own.
+    /// EDEN_NX2_KEEP_LEAD=0/1 forces it. Unset: Ocarina of Time on an integrated AMD GPU.
+    static bool KeepLeadWhenBehind(u64 program_id) {
+        static const int forced = [] {
+            const char* value = std::getenv("EDEN_NX2_KEEP_LEAD");
+            return value == nullptr ? -1 : value[0] == '0' ? 0 : 1;
+        }();
+        if (forced >= 0) {
+            return forced == 1;
+        }
+        constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+        return program_id == OcarinaOfTimeProgramId &&
+               Tegra::g_nx2_amd_igpu.load(std::memory_order_relaxed);
     }
 
     // The console's compositor frees a buffer only once its frame's GPU fence has passed, which
@@ -1942,7 +1969,7 @@ private:
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
-        u32 presents{}, ran_ahead{};
+        u32 presents{}, ran_ahead{}, lead_kept{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)

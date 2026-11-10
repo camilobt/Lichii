@@ -28,12 +28,20 @@ enum class Switch : u32 {
     /// EDEN_NX2_POLL_PUBLISH: the split's front publishes the words it holds before it polls
     /// suspended channels, instead of leaving them to the 1 ms valve drain.
     PollPublish,
+    /// EDEN_NX2_PRESENT_LEAD: with EDEN_NX2_FRAMES_AHEAD's one frame lead, a present that finds the
+    /// previous frame unfinished no longer also waits for its own (nx2_gsv.h). Unset, on only for
+    /// Ocarina of Time on an integrated GPU on RADV: the caller decides the title (Forced()).
+    PresentLead,
+    /// EDEN_NX2_EARLY_READS: 4x the early read-back download limits (buffer_cache_base.h).
+    EarlyReads,
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(Switch::Count)> switch_names{
     "EDEN_NX2_FENCE_VIEW",
     "EDEN_NX2_POLL_PUBLISH",
+    "EDEN_NX2_PRESENT_LEAD",
+    "EDEN_NX2_EARLY_READS",
 };
 
 /// Set by the Vulkan renderer once its device is known: an integrated GPU on RADV.

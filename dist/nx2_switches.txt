@@ -29,6 +29,20 @@ EDEN_NX2_FENCE_BATCH=1
 # Ocarina of Time with =0 (or =2): 30.9 fps against 38.9 unset, same spot and settings.
 #EDEN_NX2_FRAMES_AHEAD=1
 
+# --- Integrated AMD GPUs on RADV (Steam Deck) ---
+# Each is 0 (off) or 1 (on). Unset, they are on only with an integrated GPU on RADV, where every wait
+# for the host GPU lasts milliseconds. Set them for A/B runs.
+# A GPU semaphore acquire is met by a fence-flagged release the GPU thread already ran, instead of
+# parking the channel until the host GPU lands it in memory. The guest CPU still sees it on landing.
+#EDEN_NX2_FENCE_VIEW=0
+# The split's front publishes what it holds before polling suspended channels.
+#EDEN_NX2_POLL_PUBLISH=0
+# With EDEN_NX2_FRAMES_AHEAD=1, a present that finds the previous frame unfinished no longer also
+# waits for its own. Unset: only Ocarina of Time on an integrated RADV GPU. =1 for any title.
+#EDEN_NX2_PRESENT_LEAD=0
+# 4x the early read-back download limits (128 pending, 4 MiB a frame, 256 pages).
+#EDEN_NX2_EARLY_READS=0
+
 # --- Workarounds / Debug ---
 # Terrain/indirect drawing fix for Donkey Kong Bananza: enabled by default. Set to 0 only to leave to GPU.
 #EDEN_NX2_RESETFIX=0

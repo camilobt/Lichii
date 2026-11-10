@@ -48,6 +48,7 @@
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/rasterizer_download_area.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -1051,6 +1052,28 @@ private:
     /// flush on demand.
     static constexpr u64 EarlyBytesPerFrame = 1_MiB;
     static constexpr u32 MaxPendingEarlyDownloads = 32;
+    /// The three limits above as used. An early download stays pending until the host GPU has
+    /// run it, so a host GPU that is a frame behind (an integrated one: ~25 ms of work a frame in
+    /// Ocarina on a Steam Deck) holds more than 32 most of the time. Past the limit the pages'
+    /// reads flush on demand again, and such a read waits for everything the game has submitted
+    /// to pass both GPU threads, not only for the host GPU. Wider there: 4x the pending downloads,
+    /// the bytes and the pages. EDEN_NX2_EARLY_READS=1 widens them on any host, =0 keeps them.
+    struct EarlyReadLimits {
+        size_t pages;
+        u64 bytes_per_frame;
+        u32 pending;
+    };
+    [[nodiscard]] static const EarlyReadLimits& EarlyLimits() {
+        // Read at the first early read-back, after the Vulkan device set g_integrated_radv.
+        static const EarlyReadLimits limits = [] {
+            return Nx2Latency::Enabled(Nx2Latency::Switch::EarlyReads)
+                       ? EarlyReadLimits{4 * MaxReadBackPages, 4 * EarlyBytesPerFrame,
+                                         4 * MaxPendingEarlyDownloads}
+                       : EarlyReadLimits{MaxReadBackPages, EarlyBytesPerFrame,
+                                         MaxPendingEarlyDownloads};
+        }();
+        return limits;
+    }
     std::vector<ReadBackPage> read_back_pages; ///< Sorted by page
     /// NoteReportPending's results not yet written, oldest first.
     struct PendingReport {

@@ -60,6 +60,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/textures/decoders.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -1854,7 +1855,11 @@ private:
                                         m_previous_fence_id, m_previous_fence_value);
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             if (gpu_behind) {
-                WaitForFrame(~w[22], w[24]);
+                ++m_stats.behind;
+                if (!KeepLeadWhenBehind(app_program_id)) {
+                    ++m_stats.drained;
+                    WaitForFrame(~w[22], w[24]);
+                }
             }
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);
@@ -1921,16 +1926,39 @@ private:
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
-                         "pacing {} us, {} ran a frame ahead",
+                         "pacing {} us, {} ran a frame ahead, {} found the previous frame "
+                         "unfinished ({} then waited for their own)",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600, m_stats.ran_ahead);
+                         m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.behind,
+                         m_stats.drained);
                 m_stats = {.last_present = entered};
             }
         }
         constexpr u64 AvailableSlots = 0x7fff;
         TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots),
                              static_cast<u32>(AvailableSlots >> 32), 0, 0, 0, 0});
+    }
+
+    /// With the one frame lead (EDEN_NX2_FRAMES_AHEAD=1) and the previous frame still unfinished,
+    /// whether the present returns once that frame is done instead of also waiting for its own.
+    /// The previous frame's fence is the one the GPU thread's back signals (SignalSyncPoint), so
+    /// "unfinished" means Eden's GPU threads are the slower side, not that the host GPU is full.
+    /// On a Steam Deck they always are (they wait for the slow host GPU many times a frame), and
+    /// the second wait drained the whole pipeline every other present: the game then prepared the
+    /// next frame while the GPU threads and the host GPU idled. Ocarina runs a frame ahead on every
+    /// faster host, and its previous frame's fence still bounds the lead to one frame. Splatoon
+    /// Raiders needs the wait (it reuses command memory as if the GPU were at most a frame behind).
+    /// EDEN_NX2_PRESENT_LEAD=0 always waits, =1 keeps the lead for any title; unset, Ocarina of
+    /// Time on an integrated GPU on RADV keeps it.
+    static bool KeepLeadWhenBehind(u64 program_id) {
+        using VideoCommon::Nx2Latency::Switch;
+        if (const int forced = VideoCommon::Nx2Latency::Forced(Switch::PresentLead); forced >= 0) {
+            return forced == 1;
+        }
+        constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+        return program_id == OcarinaOfTimeProgramId &&
+               VideoCommon::Nx2Latency::g_integrated_radv.load(std::memory_order_relaxed);
     }
 
     // The console's compositor frees a buffer only once its frame's GPU fence has passed, which
@@ -1943,6 +1971,7 @@ private:
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
         u32 presents{}, ran_ahead{};
+        u32 behind{}, drained{}; ///< Presents with the previous frame unfinished; those that waited
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)

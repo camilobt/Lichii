@@ -92,6 +92,7 @@ add_library(
     multi_level_page_table.h
     overflow.h
     page_table.cpp
+    nx2_host.h
     page_table.h
     param_package.cpp
     param_package.h

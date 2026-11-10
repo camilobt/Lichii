@@ -20,6 +20,7 @@
 
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
+#include "common/nx2_host.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -555,6 +556,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread", true);
+        Common::Nx2Host::PollThreadBoost();
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};

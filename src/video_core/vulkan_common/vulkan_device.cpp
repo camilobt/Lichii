@@ -24,6 +24,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
+#include "common/nx2_host.h"
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -558,6 +559,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
                                  properties.subgroup_size_control.maxSubgroupSize > GuestWarpSize;
 
     is_integrated = properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    // Steam Deck class hosts: the defaults of common/nx2_host.h's switches.
+    constexpr u32 AmdVendorId = 0x1002;
+    Common::Nx2Host::g_integrated_radv.store(
+        is_integrated && properties.properties.vendorID == AmdVendorId &&
+            properties.driver.driverID == VK_DRIVER_ID_MESA_RADV,
+        std::memory_order_relaxed);
     is_virtual = properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
     is_non_gpu = properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_OTHER ||
                  properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;

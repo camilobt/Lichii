@@ -15,6 +15,7 @@
 #include "common/cpu_features.h"
 #include "common/cpu_features.h"
 #include "common/logging.h"
+#include "common/nx2_host.h"
 #include "common/thread_cpu_clock.h"
 
 #ifdef _WIN32
@@ -144,6 +145,7 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
             // base frequency in MHz: 1ns (10^-9) = 1GHz (10^9)
             while (!stop_token.stop_requested()) {
                 while (!paused && !stop_token.stop_requested()) {
+                    Common::Nx2Host::PollThreadBoost();
                     paused_set = false;
                     if (auto const next_time = Advance(); next_time) {
                         // There are more events left in the queue, wait until the next event.

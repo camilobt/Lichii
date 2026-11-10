@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 
 #include "common/logging.h"
+#include "common/nx2_host.h"
 #include "common/settings.h"
 #include "common/dkb_cpu_trace.h"
 #include "common/thread.h"
@@ -526,6 +527,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
     }};
 
     while (!stop_token.stop_requested()) {
+        Common::Nx2Host::PollThreadBoost();
         std::unique_ptr<CommandChunk> work;
 
         {

@@ -15,6 +15,7 @@
 
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
+#include "common/nx2_host.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -79,6 +80,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto& split = VideoCommon::GpuSplit::Get();
         while (!stop_token.stop_requested()) {
             Profile::Report();
+            Common::Nx2Host::PollThreadBoost();
             split.MaybeStart(system);
             if (VideoCommon::g_acquire_counting) {
                 split.ReportAcquire();

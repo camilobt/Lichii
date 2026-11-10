@@ -22,6 +22,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/nx2_host.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -277,6 +278,7 @@ private:
             pending_flushes.pop_front();
         };
         while (!stop_token.stop_requested()) {
+            Common::Nx2Host::PollThreadBoost();
             {
                 std::unique_lock lock(guard);
                 cv.wait(lock, [&] { return stop_token.stop_requested() || !fences.empty(); });

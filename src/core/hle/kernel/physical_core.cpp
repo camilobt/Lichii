@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -244,10 +245,32 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     }
     const auto spin = std::chrono::microseconds{spin_us};
     if (spin.count() > 0) {
-        const auto deadline = std::chrono::steady_clock::now() + spin;
-        while (!m_is_interrupted.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::yield();
+        // EDEN_NX2_IDLE_SPINNERS=<n>: at most n cores poll at once, the others block at once. The
+        // polling suits a host with a thread to spare for every guest core; a four-core, eight-
+        // thread host (Steam Deck) also runs the GPU threads and the Vulkan worker, and up to six
+        // polling cores take their time. Unset: no limit.
+        static const int max_spinners = [] {
+            const char* text = std::getenv("EDEN_NX2_IDLE_SPINNERS");
+            return text ? static_cast<int>(std::strtol(text, nullptr, 10)) : -1;
+        }();
+        static std::atomic<int> spinners{0};
+        const bool limited = max_spinners >= 0;
+        bool may_spin = true;
+        if (limited) {
+            may_spin = spinners.fetch_add(1, std::memory_order_relaxed) < max_spinners;
+            if (!may_spin) {
+                spinners.fetch_sub(1, std::memory_order_relaxed);
+            }
+        }
+        if (may_spin) {
+            const auto deadline = std::chrono::steady_clock::now() + spin;
+            while (!m_is_interrupted.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+            if (limited) {
+                spinners.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
     }
     std::unique_lock lk{m_guard};

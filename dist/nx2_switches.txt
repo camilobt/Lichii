@@ -29,6 +29,18 @@ EDEN_NX2_FENCE_BATCH=1
 # Ocarina of Time with =0 (or =2): 30.9 fps against 38.9 unset, same spot and settings.
 #EDEN_NX2_FRAMES_AHEAD=1
 
+# Ocarina on an integrated AMD GPU (Steam Deck): the present keeps the one frame lead even when the
+# GPU side is behind, instead of also waiting for its own frame. 0 brings the old wait back, 1 keeps
+# the lead on any host. Unset: on for Ocarina on an integrated AMD GPU only.
+#EDEN_NX2_KEEP_LEAD=1
+
+# Switch 2: copy back at the fences the pages the guest CPU reads (reads after the fence skip the
+# host GPU wait). A read of a range the GPU wrote since its last download still flushes. Off by default.
+#EDEN_NX2_PREFLUSH_READS=1
+
+# Guest cores that poll at once when idle (the poll is EDEN_NX2_IDLE_SPIN_US). Unset: no limit.
+#EDEN_NX2_IDLE_SPINNERS=2
+
 # --- Workarounds / Debug ---
 # Terrain/indirect drawing fix for Donkey Kong Bananza: enabled by default. Set to 0 only to leave to GPU.
 #EDEN_NX2_RESETFIX=0

@@ -334,13 +334,24 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     DAddr device_addr_end_aligned = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
     area->start_address = device_addr_start_aligned;
     area->end_address = device_addr_end_aligned;
-    if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
+    const bool strict_preflush = StrictPreflush();
+    if (memory_tracker.IsRegionPreflushable(device_addr, size) &&
+        // With EDEN_NX2_PREFLUSH_READS the trap fired for a GPU write that the fence download
+        // may not have landed yet: only a range without GPU writes left is free to read.
+        !(strict_preflush &&
+          IsRegionGpuModified(device_addr_start_aligned,
+                              device_addr_end_aligned - device_addr_start_aligned))) {
         // Fence downloads keep it, once the first read's download is in guest memory.
         area->in_flight = std::ranges::any_of(read_downloads, [&](const ReadDownload& download) {
             return download.write_ranges.Intersects(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         });
         area->preemtive = !area->in_flight;
+        if (strict_preflush) {
+            // The core consumed this trap: the next GPU write has to arm the range again.
+            read_trapped_ranges.Subtract(device_addr_start_aligned,
+                                         device_addr_end_aligned - device_addr_start_aligned);
+        }
         return area;
     };
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
@@ -385,6 +396,12 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
             memory_tracker.MarkRegionAsPreflushable(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         } else {
+            if (strict_preflush) {
+                // Hot page: its later GPU writes are copied back at the fences too.
+                memory_tracker.MarkRegionAsPreflushable(
+                    device_addr_start_aligned,
+                    device_addr_end_aligned - device_addr_start_aligned);
+            }
             if constexpr (USE_MEMORY_MAPS) {
                 cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
                 download_cpu_read_ranges = true;

@@ -844,6 +844,21 @@ private:
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
 
+    /// EDEN_NX2_PREFLUSH_READS=1 (default off), Switch 2 titles: pages the guest CPU read after a
+    /// GPU write are also copied back at the following fences (Preflushable), so a later read
+    /// that comes after that fence finds the bytes in guest memory and doesn't wait for the host
+    /// GPU, as on Switch 1. Unlike there, the read trap stays armed on those pages and a read of a
+    /// range the GPU wrote since its last download still flushes on demand (GetFlushArea): the
+    /// guest sees its syncpoint before the host fence, so a mark alone could return stale bytes.
+    bool StrictPreflush() const {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_PREFLUSH_READS");
+            return value != nullptr && value[0] == '1';
+        }();
+        return enabled && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
+               !AsyncBufferDownloads();
+    }
+
     /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU
     /// has read (Preflushable, set by the first reactive flush) always are: later reads skip the
     /// flush and rely on these downloads, e.g. collision meshes skinned by compute shaders.
@@ -881,7 +896,7 @@ private:
                 queued += upper - lower;
             }
         });
-        if (queued < size) {
+        if (queued < size || StrictPreflush()) {
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {

@@ -59,6 +59,10 @@ enum class DrainSite : u32 {
 struct AcquireStats {
     std::atomic<u64> passed{};    ///< Acquires and polls met without a drain
     std::atomic<u64> by_queued{}; ///< Of passed: met by a release the back had not run yet
+    /// Met by a fence-flagged release the back ran, before its fence landed it (FENCE_VIEW)
+    std::atomic<u64> by_unlanded{};
+    std::atomic<u64> parked{};    ///< Suspended acquires that resumed
+    std::atomic<u64> parked_ns{}; ///< ...and how long they waited from the acquire on
     std::atomic<u64> latched{};   ///< Polls resumed by a release the back ran (no drain)
     std::atomic<u64> drained{};   ///< Acquires and polls that drained the split
     std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire

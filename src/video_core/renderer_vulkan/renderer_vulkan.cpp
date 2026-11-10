@@ -22,6 +22,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/present.h"
 #include "video_core/render_trace.h"
@@ -197,6 +198,19 @@ try
 #ifdef HAS_RESHADE
     VideoCore::FxChain::Instance().LoadFromSettings();
 #endif
+
+    {
+        namespace Latency = VideoCommon::Nx2Latency;
+        Latency::g_integrated_radv.store(device.IsIntegrated() &&
+                                             device.GetDriverID() == VK_DRIVER_ID_MESA_RADV,
+                                         std::memory_order_relaxed);
+        LOG_INFO(Render_Vulkan, "Latency switches: {} {}, {} {} (integrated RADV: {})",
+                 Latency::switch_names[0],
+                 Latency::Enabled(Latency::Switch::FenceView) ? "on" : "off",
+                 Latency::switch_names[1],
+                 Latency::Enabled(Latency::Switch::PollPublish) ? "on" : "off",
+                 Latency::g_integrated_radv.load(std::memory_order_relaxed));
+    }
 
     device_info = {
         .model = std::string{device.GetModelName()},

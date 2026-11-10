@@ -25,6 +25,12 @@ namespace Tegra {
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
 
+// Set by the Vulkan device when it is an integrated AMD GPU (Steam Deck class: RADV, or AMD's own
+// drivers, on a GPU that shares the CPU's memory). Behaviour that only pays off on such hosts
+// (thread hand-offs paid for with a slow CPU, one memory pool) keys on this; every other host
+// keeps its defaults. Each such behaviour has its own EDEN_NX2_* switch that overrides it.
+inline std::atomic<bool> g_nx2_amd_igpu{false};
+
 // GPU VA that nx2:gpu GetVaRange and GetUserPartition report to NVN. The in-process
 // allocator hands out addresses in [Nx2GpuVaStart, Nx2GpuVaEnd). NvRm's AllocAsEx range
 // can be smaller; the GMMU page tables still have to cover this one.

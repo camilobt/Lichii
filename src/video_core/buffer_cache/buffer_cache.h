@@ -885,7 +885,7 @@ void BufferCache<P>::NoteReadBack(DAddr begin, DAddr end, bool gpu_modified) {
                 if (!gpu_modified) {
                     continue;
                 }
-                if (read_back_pages.size() >= MaxReadBackPages) {
+                if (read_back_pages.size() >= EarlyLimits().pages) {
                     // The page whose writes were read longest ago makes room.
                     read_back_pages.erase(
                         std::ranges::min_element(read_back_pages, {}, &ReadBackPage::last_read));
@@ -970,8 +970,8 @@ void BufferCache<P>::RecordEarlyDownloads() {
         }
         early_pages.clear();
         // Bounded: past it, the reads of these pages flush on demand.
-        if (pending_early_downloads >= MaxPendingEarlyDownloads ||
-            early_bytes_this_frame >= EarlyBytesPerFrame) {
+        if (pending_early_downloads >= EarlyLimits().pending ||
+            early_bytes_this_frame >= EarlyLimits().bytes_per_frame) {
             return;
         }
         RecordReadDownload(pages, pages, true);
@@ -1000,7 +1000,7 @@ void BufferCache<P>::NoteEarlyLanded(const ReadDownload& download,
                                      const Common::RangeSet<DAddr>& cpu_written) {
     // Pages no read came for since keep theirs until a download lands there. Bounded: past it,
     // their reads are not compared.
-    if (early_landed.size() >= 4 * MaxReadBackPages) {
+    if (early_landed.size() >= 4 * EarlyLimits().pages) {
         early_landed.clear();
     }
     download.clean_ranges.ForEach([&](DAddr start, DAddr end) {

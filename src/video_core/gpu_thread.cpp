@@ -25,6 +25,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
@@ -77,6 +78,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto last_progress = std::chrono::steady_clock::now();
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
+        const bool poll_publish =
+            VideoCommon::Nx2Latency::Enabled(VideoCommon::Nx2Latency::Switch::PollPublish);
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
@@ -103,6 +106,13 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     // present waited ~17 ms a frame in Kokiri village, with 50 us ~1 ms. A channel
                     // still waiting after 2 s (menus, loading) goes back to 1 ms sleeps.
                     Profile::Scope scope{Profile::Zone::PendingSleep};
+                    // EDEN_NX2_POLL_PUBLISH: the words sent since the last publish (the release
+                    // another channel waits for, often) would wait out the polls below, up to the
+                    // 1 ms valve drain, while the back runs out of work: hand them over first.
+                    // Port of 0758309bcc (hellasleeper108, #805).
+                    if (poll_publish && split.Active()) {
+                        split.Publish();
+                    }
                     split.SettleIdleBack();
                     const auto waited = std::chrono::steady_clock::now() - last_progress;
                     if (waited < std::chrono::microseconds{500}) {

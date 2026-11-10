@@ -155,6 +155,19 @@ public:
         wake.notify_one();
     }
 
+    /// Work the back runs out of order, as soon as it finishes its current entry: a guest read's
+    /// download (GPU::OnCPURead with EDEN_NX2_URGENT_READS). Set before the back starts.
+    void SetUrgentHook(void (*hook)(void*), void* argument) {
+        urgent_hook = hook;
+        urgent_argument = argument;
+    }
+    /// Any thread: has the back call the urgent hook between entries, or at once if it sleeps.
+    void RequestUrgent() {
+        urgent_requested.store(true, std::memory_order_seq_cst);
+        wake.fetch_add(1, std::memory_order_seq_cst);
+        wake.notify_one();
+    }
+
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
     /// commands read without cache flushes). Called by the front between commands.
     void MaybeStart(Core::System& system);
@@ -425,6 +438,15 @@ private:
     }
 
     void BackLoop(std::stop_token stop_token);
+    /// The back: runs the urgent hook. It uses the Vulkan scheduler, so the back is not quiet
+    /// (Drain) until its idle hook has run again.
+    void RunUrgent() {
+        urgent_requested.store(false, std::memory_order_seq_cst);
+        if (urgent_hook != nullptr) {
+            back_quiet.store(false, std::memory_order_seq_cst);
+            urgent_hook(urgent_argument);
+        }
+    }
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
@@ -473,7 +495,10 @@ private:
     static inline thread_local bool on_gpu_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
+    void (*urgent_hook)(void*){};
+    void* urgent_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
+    std::atomic<bool> urgent_requested{};
     std::atomic<bool> back_running{};
     std::atomic<bool> back_quiet{true};
 

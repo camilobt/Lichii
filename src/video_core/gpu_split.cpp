@@ -566,7 +566,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                                                        : std::chrono::steady_clock::time_point{};
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
-                                !hook_requested.load(std::memory_order_relaxed);
+                                !hook_requested.load(std::memory_order_relaxed) &&
+                                !urgent_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
@@ -580,6 +581,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position) {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                if (urgent_requested.load(std::memory_order_seq_cst)) [[unlikely]] {
+                    RunUrgent();
+                }
                 // The front may already see everything consumed: Drain() waits for back_quiet
                 // too, so the deferred submit can't overlap whatever the front does next.
                 if (!back_quiet.load(std::memory_order_relaxed)) {
@@ -598,7 +602,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 available = published.load(std::memory_order_seq_cst);
                 // A request made after the hook ran (RequestIdleHook) runs it before sleeping.
                 if (available == read_position && !stop_token.stop_requested() &&
-                    !hook_requested.load(std::memory_order_seq_cst)) {
+                    !hook_requested.load(std::memory_order_seq_cst) &&
+                    !urgent_requested.load(std::memory_order_seq_cst)) {
                     Count(g_acquire_stats.back_sleeps);
                     wake.wait(seen, std::memory_order_seq_cst);
                 }
@@ -618,6 +623,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
+            }
+            if (urgent_requested.load(std::memory_order_relaxed)) [[unlikely]] {
+                RunUrgent();
             }
             // Hand ring space back now and then while working through a long batch, and at once
             // when the front waits for this position (WaitForWriters).

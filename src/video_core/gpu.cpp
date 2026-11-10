@@ -8,11 +8,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <list>
 #include <memory>
 #include <utility>
 
 #include "common/assert.h"
+#include "common/nx2_host.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -34,6 +36,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
@@ -198,6 +201,100 @@ struct GPU::Impl {
         }
     }
 
+    /// A guest read's flush that the split's back may run out of order (EDEN_NX2_URGENT_READS).
+    /// Guarded by sync_request_mutex.
+    struct UrgentRead {
+        DAddr addr{};
+        u64 size{};
+        bool claimed{}; ///< The urgent hook or the in-order request took it
+        bool done{};
+    };
+
+    /// On the thread that owns the caches: flushes the read's area unless the other way there
+    /// already did, and releases the reader.
+    void RunReadFlush(const std::shared_ptr<UrgentRead>& read) {
+        {
+            std::scoped_lock lck{sync_request_mutex};
+            if (read->claimed) {
+                return;
+            }
+            read->claimed = true;
+        }
+        namespace AsyncReadback = VideoCore::AsyncReadback;
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::TickWork);
+        const u64 start = AsyncReadback::Now();
+        // Apply collected guest writes before downloading GPU data over guest memory.
+        InvalidateGPUCache();
+        renderer->ReadRasterizer()->FlushRegionForRead(read->addr, read->size);
+        AsyncReadback::Add(AsyncReadback::g_counters.flush_ns, AsyncReadback::Now() - start);
+        {
+            std::scoped_lock lck{sync_request_mutex};
+            read->done = true;
+        }
+        sync_request_cv.notify_all();
+    }
+
+    /// The split's back, between two entries (GpuSplit::RequestUrgent).
+    void TickUrgentReads() {
+        std::unique_lock lck{sync_request_mutex};
+        while (!urgent_reads.empty()) {
+            const std::shared_ptr<UrgentRead> read = std::move(urgent_reads.front());
+            urgent_reads.pop_front();
+            lck.unlock();
+            RunReadFlush(read);
+            lck.lock();
+        }
+    }
+
+    /// Has the area of a guest read flushed and returns once its downloads are submitted.
+    /// A flush queued as a sync operation runs after everything the game has submitted: the
+    /// reading guest thread waits for both GPU threads to work through all of it, although the
+    /// bytes it gets are those of the GPU writes the back had run when the read arrived (a write
+    /// still queued doesn't make its page GPU-modified, and such a page is read without any
+    /// wait). With EDEN_NX2_URGENT_READS=1 the split's back flushes the area as soon as it
+    /// finishes its current entry instead. The read then lacks the writes still queued, as a read
+    /// of a page not written yet already does. Off by default: the flush then runs between any
+    /// two methods rather than between command lists, which no title has been tested with.
+    void FlushForRead(DAddr addr, u64 size) {
+        static const bool urgent = Common::Nx2Host::EnvSwitch("EDEN_NX2_URGENT_READS") == 1;
+        auto& split = VideoCommon::GpuSplit::Get();
+        if (!urgent || !split.BackRunning()) {
+            const u64 fence = RequestSyncOperation([this, addr, size]() {
+                namespace AsyncReadback = VideoCore::AsyncReadback;
+                const u64 start = AsyncReadback::Now();
+                // Apply collected guest writes before downloading GPU data over guest memory.
+                InvalidateGPUCache();
+                renderer->ReadRasterizer()->FlushRegionForRead(addr, size);
+                AsyncReadback::Add(AsyncReadback::g_counters.flush_ns,
+                                   AsyncReadback::Now() - start);
+            });
+            gpu_thread.TickGPU(is_async);
+            WaitForSyncOperation(fence);
+            return;
+        }
+        const auto read = std::make_shared<UrgentRead>();
+        read->addr = addr;
+        read->size = size;
+        const auto finished = [this, &read] { return read->done || sync_requests_dropped; };
+        {
+            std::scoped_lock lck{sync_request_mutex};
+            urgent_reads.push_back(read);
+        }
+        split.RequestUrgent();
+        {
+            std::unique_lock lck{sync_request_mutex};
+            if (sync_request_cv.wait_for(lck, std::chrono::milliseconds{2}, finished)) {
+                return;
+            }
+        }
+        // The back is inside a long entry, or it stopped (the accuracy settings changed): queue
+        // the flush in order as well. Whichever comes first runs it.
+        static_cast<void>(RequestSyncOperation([this, read] { RunReadFlush(read); }));
+        gpu_thread.TickGPU(is_async);
+        std::unique_lock lck{sync_request_mutex};
+        sync_request_cv.wait(lck, finished);
+    }
+
     [[nodiscard]] u64 GetTicks() const {
         return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
                                 Settings::values.gpu_clock.GetValue(),
@@ -217,11 +314,15 @@ struct GPU::Impl {
     /// core timing events.
     void Start() {
         Settings::UpdateGPUAccuracy();
+        VideoCommon::GpuSplit::Get().SetUrgentHook(
+            [](void* impl) { static_cast<Impl*>(impl)->TickUrgentReads(); }, this);
         gpu_thread.StartThread(*renderer, renderer->Context(), scheduler);
     }
 
     void NotifyShutdown() {
         gpu_thread.NotifyShutdown();
+        // The split's back has stopped: nothing calls the hook anymore.
+        VideoCommon::GpuSplit::Get().SetUrgentHook(nullptr, nullptr);
         {
             // The GPU threads stopped: no sync operation runs anymore. Guest threads still run
             // until the kernel suspends them, and one waiting for a read's flush (OnCPURead)
@@ -230,6 +331,7 @@ struct GPU::Impl {
             // may refer to their waiters' frames, and release the waiters.
             std::scoped_lock requests_lock{sync_request_mutex};
             sync_requests.clear();
+            urgent_reads.clear();
             sync_requests_dropped = true;
         }
         sync_request_cv.notify_all();
@@ -297,17 +399,7 @@ struct GPU::Impl {
         const u64 area_size = raster_area.end_address - raster_area.start_address;
         // In flight: an earlier read's downloads cover the area, only FinishRead is left.
         if (!raster_area.in_flight) {
-            const u64 fence = RequestSyncOperation([this, raster_area, area_size]() {
-                const u64 start = AsyncReadback::Now();
-                // Apply collected guest writes before downloading GPU data over guest memory.
-                InvalidateGPUCache();
-                renderer->ReadRasterizer()->FlushRegionForRead(raster_area.start_address,
-                                                               area_size);
-                AsyncReadback::Add(AsyncReadback::g_counters.flush_ns,
-                                   AsyncReadback::Now() - start);
-            });
-            gpu_thread.TickGPU(is_async);
-            WaitForSyncOperation(fence);
+            FlushForRead(raster_area.start_address, area_size);
         }
         // The GPU thread submitted the downloads without waiting for the host GPU: this thread
         // waits for them and writes them to guest memory, while the GPU thread goes on.
@@ -437,6 +529,7 @@ struct GPU::Impl {
     std::condition_variable sync_cv;
 
     std::list<std::function<void()>> sync_requests;
+    std::deque<std::shared_ptr<UrgentRead>> urgent_reads;
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
     u64 last_sync_fence{};

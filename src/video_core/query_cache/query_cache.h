@@ -23,6 +23,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_latency.h"
 #include "video_core/nx2.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/frame_trace.h"
@@ -289,13 +290,23 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
     const bool report_noted =
         !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
+    // EDEN_NX2_FENCE_VIEW: GPU acquires may take this release's payload before its fence lands it.
+    const u64 unlanded_ticket =
+        is_fence && counter_type == QueryType::Payload &&
+                Nx2Latency::Enabled(Nx2Latency::Switch::FenceView)
+            ? Nx2Latency::UnlandedReleases::Get().Ran(cpu_addr, payload)
+            : 0;
     std::function<void()> operation([this, streamer, query_base = query, query_location,
                                      pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type, mirrored,
-                                     report_size, report_noted] {
+                                     report_size, report_noted, unlanded_ticket] {
         SCOPE_EXIT {
             if (report_noted) {
                 impl->rasterizer.FinishReport(cpu_addr, report_size);
+            }
+            // Written to memory or dropped: either way it no longer waits for its fence.
+            if (unlanded_ticket != 0) {
+                Nx2Latency::UnlandedReleases::Get().Landed(cpu_addr, unlanded_ticket);
             }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
@@ -359,6 +370,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         VideoCore::g_signaling_query_report_fence = false;
     } else {
         if (immediate) {
+            Nx2Latency::UnlandedReleases::Get().Overwritten(cpu_addr);
             FinishReads(cpu_addr, has_timestamp ? 16 : 4);
             auto& shadow = Tegra::Nx2MirrorShadow::Get();
             if (mirrored && shadow.Diverts(cpu_addr)) {
